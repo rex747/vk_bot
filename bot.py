@@ -2,9 +2,11 @@ import os
 import asyncio
 import json
 import logging
+import aiohttp
 from dotenv import load_dotenv
 from vkbottle import Bot, Keyboard, Callback, GroupEventType
 from vkbottle.bot import Message, MessageEvent
+from vkbottle.http import AiohttpClient
 import database as db
 from states import AddProductSG, DeleteProductSG, ManagePhotoSG
 from keyboards import (
@@ -16,14 +18,15 @@ load_dotenv()
 
 TOKEN = os.getenv("VK_BOT_TOKEN")
 GROUP_ID_STR = os.getenv("VK_GROUP_ID")
-
 if not TOKEN or TOKEN == "YOUR_TOKEN_HERE":
     raise ValueError("Ошибка: Токен VK не найден! Проверьте файл .env")
 if not GROUP_ID_STR:
     raise ValueError("Ошибка: VK_GROUP_ID не найден в файле .env!")
-
 GROUP_ID = int(GROUP_ID_STR)
+
 user_temp_data: dict = {}
+
+# Создаём бота с дефолтным клиентом (будет заменён в main)
 bot = Bot(token=str(TOKEN))
 
 # ---------- Вспомогательные функции ----------
@@ -41,11 +44,8 @@ def get_attachment_string(p: dict) -> str:
     photos_data = p.get("photos")
     if not photos_data:
         return ""
-    
-    # Если это уже список
     if isinstance(photos_data, list):
         photos_list = photos_data
-    # Если это строка – пробуем распарсить JSON
     elif isinstance(photos_data, str):
         try:
             photos_list = json.loads(photos_data)
@@ -53,7 +53,6 @@ def get_attachment_string(p: dict) -> str:
             photos_list = []
     else:
         photos_list = []
-    
     return ",".join(photos_list) if photos_list else ""
 
 # ---------- Главное меню ----------
@@ -65,7 +64,6 @@ async def start_handler(m: Message):
         pass
     if m.from_id in user_temp_data:
         del user_temp_data[m.from_id]
-
     await db.init_db()
     await m.answer("🛍 Добро пожаловать в магазин! Выберите действие:", keyboard=main_menu_kb())
 
@@ -139,12 +137,12 @@ async def callback_router(event: MessageEvent):
                 photos_list = json.loads(photos_str) if photos_str else []
             except (json.JSONDecodeError, TypeError):
                 photos_list = []
-                
+
             if photos_list:
                 await bot.state_dispenser.set(user_id, ManagePhotoSG.WAITING_PHOTO_INDEX)
                 user_temp_data.setdefault(user_id, {})["target_product_id"] = product_id
                 await bot.api.messages.send(
-                    peer_id=peer_id, 
+                    peer_id=peer_id,
                     message=f"У товара {len(photos_list)} фото. Напишите номер фото (от 1 до {len(photos_list)}), которое нужно удалить:\n\n{format_product(product)}",
                     attachment=get_attachment_string(product),
                     random_id=0
@@ -152,16 +150,16 @@ async def callback_router(event: MessageEvent):
             else:
                 await event.show_snackbar("❌ У этого товара нет фото")
 
-    # FIX: Абсолютно точный вызов метода VK API без лишних пробелов и опечаток
+    # Обязательный ответ на callback
     await bot.api.request(
-    "messages.sendMessageEventAnswer",
-    {
-        "event_id": event.object.event_id,
-        "user_id": event.object.user_id,
-        "peer_id": event.object.peer_id,
-        "event_data": '{"type": "show_snackbar", "text": "✅"}'  # или '{"type": "ok"}'
-    }
-)
+        "messages.sendMessageEventAnswer",
+        {
+            "event_id": event.object.event_id,
+            "user_id": event.object.user_id,
+            "peer_id": event.object.peer_id,
+            "event_data": '{"type": "show_snackbar", "text": "✅"}'
+        }
+    )
 
 def get_photos_count(p: dict) -> int:
     photos_data = p.get("photos")
@@ -188,8 +186,8 @@ async def refresh_product_card(event: MessageEvent, product_id: int):
             product_id,
             product.get("is_reserved", 0),
             get_photos_count(product)
-            ),
-        attachment=get_attachment_string(product), # <-- Именно это отображает фото
+        ),
+        attachment=get_attachment_string(product),
     )
 
 async def show_catalog(peer_id: int):
@@ -199,14 +197,14 @@ async def show_catalog(peer_id: int):
         return
     for p in products:
         await bot.api.messages.send(
-            peer_id=peer_id, 
+            peer_id=peer_id,
             message=format_product(p),
             keyboard=product_card_kb(
-                p["id"], 
-                p.get("is_reserved", 0), 
+                p["id"],
+                p.get("is_reserved", 0),
                 get_photos_count(p)
             ),
-            attachment=get_attachment_string(p), # <-- Именно это отображает фото
+            attachment=get_attachment_string(p),
             random_id=0
         )
 
@@ -246,7 +244,6 @@ async def add_photo(m: Message):
                     photos_list.append(f"photo{att.photo.owner_id}_{att.photo.id}_{access_key}")
                 else:
                     photos_list.append(f"photo{att.photo.owner_id}_{att.photo.id}")
-
     if not photos_list and m.text and m.text.lower().strip() == "без фото":
         photos_list = []
     elif not photos_list:
@@ -264,7 +261,7 @@ async def add_photo(m: Message):
 
     product = await db.get_product(product_id)
     await m.answer(
-        f"✅ Товар добавлен! ID: {product_id}\n\n{format_product(product)}", 
+        f"✅ Товар добавлен! ID: {product_id}\n\n{format_product(product)}",
         keyboard=main_menu_kb(),
         attachment=get_attachment_string(product)
     )
@@ -281,7 +278,6 @@ async def del_ask_id(m: Message):
         await bot.state_dispenser.delete(m.from_id)
     except KeyError:
         pass
-        
     product = await db.get_product(pid)
     if not product:
         await m.answer("❌ Товар не найден.", keyboard=main_menu_kb())
@@ -306,13 +302,12 @@ async def manage_photo_get_id(m: Message):
         await m.answer("❌ Товар не найден.", keyboard=main_menu_kb())
         await bot.state_dispenser.delete(m.from_id)
         return
-
     photos_str = product.get("photos")
     try:
         photos_list = json.loads(photos_str) if photos_str else []
     except (json.JSONDecodeError, TypeError):
         photos_list = []
-        
+
     if not photos_list:
         await m.answer("❌ У этого товара нет фото для удаления.", keyboard=main_menu_kb())
         await bot.state_dispenser.delete(m.from_id)
@@ -338,7 +333,6 @@ async def manage_photo_delete(m: Message):
         await m.answer("❌ Ошибка сессии. Начните заново через 'Меню'.", keyboard=main_menu_kb())
         await bot.state_dispenser.delete(m.from_id)
         return
-
     success = await db.remove_photo_from_product(pid, photo_index)
     await bot.state_dispenser.delete(m.from_id)
     user_temp_data.pop(m.from_id, None)
@@ -350,7 +344,7 @@ async def manage_photo_delete(m: Message):
             photos_list = json.loads(photos_str) if photos_str else []
         except (json.JSONDecodeError, TypeError):
             photos_list = []
-            
+
         await m.answer(
             f"✅ Фото успешно удалено. Осталось фото: {len(photos_list)}\n\n{format_product(product)}",
             keyboard=product_card_kb(pid, product.get("is_reserved", 0), get_photos_count(product)),
@@ -362,8 +356,21 @@ async def manage_photo_delete(m: Message):
 # ---------- Запуск ----------
 async def main():
     await db.init_db()
+
+    # Создаём HTTP-клиент с отключённой проверкой SSL
+    connector = aiohttp.TCPConnector(ssl=False)
+    session = aiohttp.ClientSession(connector=connector)
+    http_client = AiohttpClient(session=session)
+
+    # Заменяем клиент и у бота, и у его API (важно!)
+    bot.http_client = http_client
+    bot.api.http_client = http_client
+
     print("✅ Бот запущен и ожидает сообщения...")
-    await bot.run_polling()
+    try:
+        await bot.run_polling()
+    finally:
+        await session.close()
 
 if __name__ == "__main__":
     asyncio.run(main())

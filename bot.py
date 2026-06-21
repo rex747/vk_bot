@@ -362,7 +362,7 @@ async def main():
     session = aiohttp.ClientSession(connector=connector)
     http_client = AiohttpClient(session=session)
 
-    # Заменяем клиент и у бота, и у его API (важно!)
+    # Заменяем клиент и у бота, и у его API 
     bot.http_client = http_client
     bot.api.http_client = http_client
 
